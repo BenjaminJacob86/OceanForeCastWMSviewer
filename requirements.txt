@@ -1,11 +1,5 @@
-# Dependencies are provided by the conda env `geo-app`:
-#   C:\Users\jacobb\AppData\Local\miniforge3\envs\geo-app
-#
-# Expected packages: streamlit, folium, streamlit-folium
-#
-# If HTTP calls fail on import, install requests in that env:
-#   conda activate geo-app
-#   conda install -c conda-forge requests
-#   # or: pip install requests
-
-requests
+streamlit>=1.32
+folium>=0.16
+streamlit-folium>=0.20
+pandas>=2.0
+requests>=2.31
