@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import time
 from datetime import date
 
 import folium
@@ -15,7 +16,6 @@ from colormaps import palette_options, style_with_palette
 from wms_client import (
     WmsLayer,
     available_timesteps,
-    build_getmap_params,
     dataset_url,
     default_style,
     fetch_capabilities,
@@ -41,6 +41,10 @@ st.set_page_config(
 
 DEFAULT_LAYER = "Hs"
 MAP_HEIGHT = 650
+FIG_CAPTION = (
+    "Fig. 1 — German Bight model domain (interactive map). "
+    "Click to extract a time series."
+)
 
 
 @st.cache_data(show_spinner="Loading WMS capabilities…")
@@ -63,8 +67,9 @@ def load_timesteps(wms_url: str, layer_name: str, layer_time_dim: str | None, fo
 
 
 @st.cache_data(show_spinner="Loading palettes…")
-def load_layer_palettes(wms_url: str, layer_name: str, time_iso: str | None) -> tuple[list[str], str]:
-    details = fetch_layer_details(wms_url, layer_name, time_iso)
+def load_layer_palettes(wms_url: str, layer_name: str) -> tuple[list[str], str]:
+    """Palette list for a layer (independent of timestep)."""
+    details = fetch_layer_details(wms_url, layer_name, time_iso=None)
     palettes = details.get("palettes") or ["default"]
     default_palette = details.get("defaultPalette") or "default"
     return palettes, default_palette
@@ -229,8 +234,8 @@ cross-sectional areas.
 
 def main() -> None:
     st.title("Hereon pre-operational hydrodynamic forecast system for the German Bight")
-
     with st.sidebar:
+        st.image("https://www.hereon.de/cms60/res/assets/logos/hereon_logo.svg")
         st.header("Forecast selection")
 
         forecast_date = st.date_input(
@@ -252,8 +257,8 @@ def main() -> None:
     layer_by_name = {layer.name: layer for layer in layers}
     layer_names = list(layer_by_name.keys())
 
-    render_about_header(layers)
-    st.divider()
+    # render_about_header(layers)
+    # st.divider()
 
     with st.sidebar:
         default_index = layer_names.index(DEFAULT_LAYER) if DEFAULT_LAYER in layer_names else 0
@@ -284,38 +289,125 @@ def main() -> None:
         normalized = [normalize_timestep(t, forecast_date) for t in timesteps]
         time_labels = {format_time_label(t, forecast_date): iso for t, iso in zip(timesteps, normalized)}
         label_list = list(time_labels.keys())
+        default_idx = min(len(label_list) // 2, len(label_list) - 1)
 
-        selected_label = st.select_slider(
-            "Hour (browse forecast times)",
-            options=label_list,
-            value=label_list[min(len(label_list) // 2, len(label_list) - 1)],
-        )
-        time_iso = time_labels[selected_label]
+        time_slider_ctx = (str(forecast_date), selected_name, tuple(label_list))
+        if st.session_state.get("time_slider_ctx") != time_slider_ctx:
+            st.session_state.time_slider_ctx = time_slider_ctx
+            st.session_state.ts_index = default_idx
+            st.session_state.hour_slider = label_list[default_idx]
+            st.session_state.playing = False
+
+        if "ts_index" not in st.session_state:
+            st.session_state.ts_index = default_idx
+        if "playing" not in st.session_state:
+            st.session_state.playing = False
+
+        st.session_state.ts_index = max(0, min(st.session_state.ts_index, len(label_list) - 1))
+
+        play_col, speed_col = st.columns([1, 2])
+        with play_col:
+            play_label = "Pause" if st.session_state.playing else "Play"
+            play_icon = "⏸" if st.session_state.playing else "▶"
+            if st.button(f"{play_icon} {play_label}", use_container_width=True):
+                was_playing = st.session_state.playing
+                st.session_state.playing = not st.session_state.playing
+                if st.session_state.playing and not was_playing:
+                    st.session_state.play_colormap = st.session_state.get(
+                        "colormap_picker", "default"
+                    )
+                    st.session_state.play_use_custom_scale = st.session_state.get(
+                        "use_custom_scale", True
+                    )
+                    if st.session_state.play_use_custom_scale:
+                        st.session_state.play_colorscale = (
+                            float(st.session_state.get("cscale_min", 0.0)),
+                            float(st.session_state.get("cscale_max", 3.0)),
+                        )
+                    else:
+                        st.session_state.play_colorscale = None
+                    st.session_state.play_plot_style = style_with_palette(
+                        style, st.session_state.play_colormap
+                    )
+        with speed_col:
+            play_speed = st.selectbox(
+                "Step interval",
+                options=[0.5, 1.0, 2.0],
+                format_func=lambda s: f"{s:g} s / step",
+                index=1,
+                label_visibility="collapsed",
+            )
+
+        st.session_state.label_list = label_list
+        st.session_state.time_labels = time_labels
+        st.session_state.normalized_times = tuple(normalized)
+        st.session_state.play_interval = float(play_speed)
+
+        # Important: Streamlit forbids mutating a widget-key after it is instantiated.
+        # During autoplay we therefore show a separate, disabled slider with a different key.
+        if st.session_state.playing:
+            st.select_slider(
+                "Hour (browse forecast times)",
+                options=label_list,
+                value=label_list[st.session_state.ts_index],
+                key="hour_slider_play",
+                disabled=True,
+            )
+        else:
+            if st.session_state.get("hour_slider") not in label_list:
+                st.session_state.hour_slider = label_list[st.session_state.ts_index]
+            st.select_slider(
+                "Hour (browse forecast times)",
+                options=label_list,
+                key="hour_slider",
+            )
+            st.session_state.ts_index = label_list.index(st.session_state.hour_slider)
 
         st.divider()
         st.subheader("Display")
 
         opacity = st.slider("Layer opacity (%)", min_value=10, max_value=100, value=85)
 
-        try:
-            server_palettes, default_palette = load_layer_palettes(wms_url, selected_name, time_iso)
-        except requests.RequestException as exc:
-            st.error(f"Could not load palettes: {exc}")
-            st.stop()
+        show_inverted = st.checkbox("Show inverted palettes", value=False)
 
-        cmap_options = palette_options(server_palettes)
+        palette_ctx = (selected_name, wms_url, show_inverted)
+        if st.session_state.get("palette_ctx") != palette_ctx:
+            try:
+                server_palettes, default_palette = load_layer_palettes(wms_url, selected_name)
+            except requests.RequestException as exc:
+                st.error(f"Could not load palettes: {exc}")
+                st.stop()
+            st.session_state.palette_ctx = palette_ctx
+            st.session_state.server_palettes = server_palettes
+            st.session_state.palette_default = default_palette
+            st.session_state.colormap_picker = default_palette
+            st.session_state.play_colormap = default_palette
+            st.session_state.play_plot_style = style_with_palette(style, default_palette)
+
+        server_palettes = st.session_state.server_palettes
+        default_palette = st.session_state.palette_default
+
+        cmap_options = palette_options(server_palettes, include_inverted=show_inverted)
         if default_palette not in cmap_options:
             cmap_options = [default_palette, *cmap_options]
-        cmap_index = cmap_options.index(default_palette) if default_palette in cmap_options else 0
 
-        show_inverted = st.checkbox("Show inverted palettes", value=False)
-        if show_inverted:
-            cmap_options = palette_options(server_palettes, include_inverted=True)
-            if default_palette not in cmap_options:
-                cmap_options = [default_palette, *cmap_options]
-            cmap_index = cmap_options.index(default_palette) if default_palette in cmap_options else 0
+        if st.session_state.get("colormap_picker") not in cmap_options:
+            st.session_state.colormap_picker = (
+                default_palette if default_palette in cmap_options else cmap_options[0]
+            )
 
-        selected_palette = st.selectbox("Colormap", options=cmap_options, index=cmap_index)
+        st.selectbox(
+            "Colormap",
+            options=cmap_options,
+            key="colormap_picker",
+        )
+
+        if st.session_state.playing:
+            selected_palette = st.session_state.get("play_colormap", st.session_state.colormap_picker)
+        else:
+            selected_palette = st.session_state.colormap_picker
+            st.session_state.play_colormap = selected_palette
+
         try:
             st.image(
                 load_palette_preview(wms_url, selected_palette),
@@ -325,13 +417,28 @@ def main() -> None:
         except requests.RequestException:
             pass
 
-        plot_style = style_with_palette(style, selected_palette)
+        if "cscale_min" not in st.session_state:
+            st.session_state.cscale_min = 0.0
+        if "cscale_max" not in st.session_state:
+            st.session_state.cscale_max = 3.0
 
-        use_custom_scale = st.checkbox("Custom colour scale", value=True)
-        colorscale: tuple[float, float] | None = None
-        if use_custom_scale:
-            cmin, cmax = st.number_input("Min", value=0.0), st.number_input("Max", value=3.0)
-            colorscale = (cmin, cmax)
+        use_custom_scale = st.checkbox("Custom colour scale", value=True, key="use_custom_scale")
+        st.number_input("Min", key="cscale_min")
+        st.number_input("Max", key="cscale_max")
+
+        if st.session_state.playing:
+            plot_style = st.session_state.play_plot_style
+            colorscale = st.session_state.play_colorscale
+        else:
+            plot_style = style_with_palette(style, selected_palette)
+            colorscale = None
+            if use_custom_scale:
+                colorscale = (
+                    float(st.session_state.cscale_min),
+                    float(st.session_state.cscale_max),
+                )
+            st.session_state.play_plot_style = plot_style
+            st.session_state.play_colorscale = colorscale
 
     # Keep colour-bar column flush with the Folium iframe (same height, top-aligned).
     st.markdown(
@@ -346,10 +453,28 @@ def main() -> None:
         [data-testid="column"]:last-child .forecast-legend-panel {{
             height: {MAP_HEIGHT}px !important;
         }}
+        hr.forecast-map-separator {{
+            border: none;
+            border-top: 1px solid #8ecae6;
+            margin: 1.25rem 0 0.65rem 0;
+        }}
+        p.forecast-fig-caption {{
+            font-size: 1.125rem;
+            line-height: 1.5;
+            margin: 0 0 0.75rem 0;
+            color: inherit;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+    st.markdown('<hr class="forecast-map-separator" />', unsafe_allow_html=True)
+    st.markdown(
+        f'<p class="forecast-fig-caption">{FIG_CAPTION}</p>',
+        unsafe_allow_html=True,
+    )
+
     col_map, col_legend = st.columns([4, 1], vertical_alignment="top")
 
     if "ts_marker" not in st.session_state:
@@ -359,6 +484,19 @@ def main() -> None:
     if st.session_state.get("ts_context") != ts_context:
         st.session_state.ts_context = ts_context
         st.session_state.ts_marker = None
+        st.session_state.playing = False
+
+    # Resolve timestep here (not from slider widget state while animating).
+    normalized_list = list(st.session_state.normalized_times)
+    ts_index = st.session_state.ts_index
+    if st.session_state.playing:
+        time_iso = normalized_list[ts_index]
+        plot_style = st.session_state.play_plot_style
+        colorscale = st.session_state.play_colorscale
+    else:
+        time_iso = st.session_state.time_labels[st.session_state.hour_slider]
+        plot_style = st.session_state.play_plot_style
+        colorscale = st.session_state.play_colorscale
 
     with col_map:
         marker = st.session_state.ts_marker
@@ -377,11 +515,7 @@ def main() -> None:
             width=None,
             height=MAP_HEIGHT,
             returned_objects=["last_clicked"],
-            key="forecast_map",
-        )
-        st.caption(
-            "Fig. 1 — German Bight model domain (interactive map). "
-            "Click to extract a time series."
+            key=f"forecast_map_{ts_index}_{time_iso}",
         )
 
         click = map_state.get("last_clicked") if map_state else None
@@ -392,11 +526,12 @@ def main() -> None:
                 st.rerun()
 
     with col_legend:
+        leg_time = None if st.session_state.get("playing") else time_iso
         leg_url = legend_url(
             wms_url,
             selected_name,
             plot_style,
-            time_iso=time_iso,
+            time_iso=leg_time,
             colorscale_range=colorscale,
             height=MAP_HEIGHT,
             colorbar_only=False,
@@ -421,7 +556,7 @@ def main() -> None:
                 selected_layer.bbox,
                 ts_lat,
                 ts_lon,
-                tuple(normalized),
+                st.session_state.normalized_times,
             )
             ts_df = pd.DataFrame(
                 {series.value_label: series.values},
@@ -431,17 +566,12 @@ def main() -> None:
         except (requests.RequestException, ValueError) as exc:
             st.error(f"Could not load time series: {exc}")
 
-    with st.expander("Example WMS GetMap URL"):
-        params = build_getmap_params(
-            selected_name,
-            plot_style,
-            time_iso,
-            colorscale_range=colorscale,
-            opacity=opacity,
-        )
-        query = "&".join(f"{k}={v}" for k, v in params.items())
-        st.code(f"{wms_url}?{query}&crs=EPSG:3857&bbox=…&width=512&height=512", language=None)
-
+    # Advance animation after the map has been drawn for the current frame.
+    if st.session_state.get("playing"):
+        n_frames = len(st.session_state.normalized_times)
+        st.session_state.ts_index = (st.session_state.ts_index + 1) % n_frames
+        time.sleep(st.session_state.get("play_interval", 1.0))
+        st.rerun()
 
 if __name__ == "__main__":
     main()
