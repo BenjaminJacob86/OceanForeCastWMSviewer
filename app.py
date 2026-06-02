@@ -234,7 +234,7 @@ cross-sectional areas.
 
 def main() -> None:
     #st.title("Hereon pre-operational hydrodynamic forecast system for the German Bight")
-    st.title("German Bight hdrodynamic forecast")
+    st.title("German Bight hydrodynamic forecast")
     with st.sidebar:
         st.image("https://www.hereon.de/cms60/res/assets/logos/hereon_logo.svg")
         st.header("Forecast selection")
